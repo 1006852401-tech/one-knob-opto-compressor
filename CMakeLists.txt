@@ -1,64 +1,73 @@
-cmake_minimum_required(VERSION 3.15)
-project(OneKnobOpto VERSION 1.0.0 LANGUAGES C CXX)
+name: Build & Package macOS AU and VST3 Plugins
 
-set(CMAKE_CXX_STANDARD 17)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
+on:
+  push:
+    branches: [ "main", "master" ]
+    tags: [ "v*" ]
+  pull_request:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
 
-# macOS Backward Compatibility Configuration
-if(APPLE)
-    # Minimum deployment target: macOS 10.9 Mavericks for maximum backward compatibility
-    set(CMAKE_OSX_DEPLOYMENT_TARGET "10.9" CACHE STRING "Minimum OS X version" FORCE)
-    
-    # Universal Binary: Compile for both Apple Silicon (arm64) and Intel (x86_64)
-    set(CMAKE_OSX_ARCHITECTURES "arm64;x86_64" CACHE STRING "Target architectures" FORCE)
-    
-    message(STATUS "Configuring for macOS Universal Binary (arm64 + x86_64)")
-    message(STATUS "macOS Deployment Target: ${CMAKE_OSX_DEPLOYMENT_TARGET}")
-endif()
+jobs:
+  build-macos:
+    name: Build Universal macOS AU & VST3
+    runs-on: macos-14 # Native Apple Silicon M-series runner on GitHub
 
-# Include JUCE (Fetched via FetchContent or local JUCE submodule)
-include(FetchContent)
-FetchContent_Declare(
-    JUCE
-    GIT_REPOSITORY https://github.com/juce-framework/JUCE.git
-    GIT_TAG        8.0.4
-    GIT_SHALLOW    TRUE
-)
-FetchContent_MakeAvailable(JUCE)
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
-# Declare JUCE Plugin with AU and VST3 formats
-juce_add_plugin(OneKnobOpto
-    COMPANY_NAME                "VintageAudioLab"
-    IS_SYNTH                    FALSE
-    NEEDS_MIDI_INPUT            FALSE
-    NEEDS_MIDI_OUTPUT           FALSE
-    IS_MIDI_EFFECT              FALSE
-    EDITOR_WANTS_KEYBOARD_FOCUS FALSE
-    PLUGIN_MANUFACTURER_CODE    "Valb"
-    PLUGIN_CODE                 "Okop"
-    FORMATS                     AU VST3 Standalone
-    PRODUCT_NAME                "OneKnobOpto"
-    BUNDLE_ID                   "com.vintageaudiolab.oneknobopto"
-    AU_MAIN_TYPE                "aufx" # AudioUnit Effect
-)
+      - name: Setup CMake
+        uses: jwlawson/actions-setup-cmake@v2
+        with:
+          cmake-version: '3.28.x'
 
-target_sources(OneKnobOpto PRIVATE
-    Source/OptoEngine.h
-    Source/PluginProcessor.h
-    Source/PluginProcessor.cpp
-    Source/PluginEditor.h
-    Source/PluginEditor.cpp
-)
+      - name: Install Ninja Build Tool
+        run: brew install ninja
 
-target_compile_definitions(OneKnobOpto PRIVATE
-    JUCE_WEB_BROWSER=0
-    JUCE_USE_CURL=0
-    JUCE_VST3_CAN_REPLACE_VST2=0
-)
+      - name: "Configure CMake (Universal Binary arm64 + x86_64, macOS 10.9+)"
+        run: |
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET="10.9"
 
-target_link_libraries(OneKnobOpto PRIVATE
-    juce::juce_audio_utils
-    juce::juce_recommended_config_flags
-    juce::juce_recommended_lto_flags
-    juce::juce_recommended_warning_flags
-)
+      - name: Build AU, VST3 and Standalone
+        run: |
+          cmake --build build --config Release --parallel
+
+      - name: Verify Universal Architecture with lipo
+        run: |
+          echo "=== AU Component Architecture ==="
+          lipo -info build/OneKnobOpto_artefacts/Release/AU/OneKnobOpto.component/Contents/MacOS/OneKnobOpto || true
+          echo "=== VST3 Architecture ==="
+          lipo -info build/OneKnobOpto_artefacts/Release/VST3/OneKnobOpto.vst3/Contents/MacOS/OneKnobOpto || true
+
+      - name: Package Plugins for Distribution
+        run: |
+          mkdir -p dist/OneKnobOpto-macOS-Universal/AU
+          mkdir -p dist/OneKnobOpto-macOS-Universal/VST3
+          cp -R build/OneKnobOpto_artefacts/Release/AU/OneKnobOpto.component dist/OneKnobOpto-macOS-Universal/AU/
+          cp -R build/OneKnobOpto_artefacts/Release/VST3/OneKnobOpto.vst3 dist/OneKnobOpto-macOS-Universal/VST3/
+          cp install_mac_plugins.sh dist/OneKnobOpto-macOS-Universal/ || true
+          cp README.md dist/OneKnobOpto-macOS-Universal/ || true
+          cd dist
+          zip -r ../OneKnobOpto-macOS-Universal.zip OneKnobOpto-macOS-Universal/
+
+      - name: Upload Build Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: OneKnobOpto-macOS-Universal
+          path: OneKnobOpto-macOS-Universal.zip
+
+      - name: Create GitHub Release (Triggered on v* Tag)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: OneKnobOpto-macOS-Universal.zip
+          title: Release ${{ github.ref_name }} - Mac AU & VST3 Universal Plugins
+          draft: false
+          prerelease: false
+          generate_release_notes: true
